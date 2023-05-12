@@ -18,8 +18,7 @@ library(xgboost)
 library(Metrics)
 library(ggpmisc)
 
-match_dir = 'data/matchups/'
-model_dir = 'data/models/'
+match_dir = '/Users/gabrielasanchezortiz/Desktop/School/ESS/ESS 523c/yojoa-rs-secchi-demo/data/matchups'
 ```
 
 # Purpose
@@ -62,7 +61,7 @@ prepData = function(df) {
     mutate(secchi = as.numeric(secchi)) %>% #there's one wonky value in here with two decimal points... dropping from this analysis
     filter(!is.na(secchi))
   
-  #Add ratios then trim to needd to columns to speed up run
+  #Add ratios then trim to need to columns to speed up run
   df_prep %>% 
     mutate(NR= med_Nir_corr/med_Red_corr,
            BG= med_Blue_corr/med_Green_corr,
@@ -277,11 +276,30 @@ altering the hyperparameters and see if you can get a better RMSE AND R2. Here y
 
 ```{r}
 # YOUR NEW CODE HERE
+params <- list(booster = "gbtree", 
+               objective = "reg:squarederror", 
+               eta=0.3, 
+               gamma=3, 
+               max_depth=5, 
+               min_child_weight=3, 
+               subsample=1, 
+               colsample_bytree=1)
+
+#run the boost algo with those settings
+xgb_naive_fd_bm5_play2 <- xgb.train(params = params, 
+                             data = dtrain_fd_bm5, 
+                             nrounds = 1000, 
+                             watchlist = list(train = dtrain_fd_bm5, 
+                                              val = dtest_fd_bm5), 
+                             print_every_n = 25, 
+                             early_stopping_rounds = 10, 
+                             maximize = F)
+
 ```
 
 #### Report your RMSE here
 
-
+train-rmse: 0.600290 and val-rmse: 0.774694
 
 ### What hypertuning parameters most impacted your model performance?
 
@@ -289,6 +307,7 @@ Here I'm just hoping you can describe the parameters that most impacted
 model performance, can you provide an explanation why this parameters
 mattered? 
 
+The parameter that made the most difference was the gamma.
 
 ## More Columns
 
@@ -301,14 +320,74 @@ Some key words for spectral indices that might help include *chlorophyll*, *sedi
 *turbidity* and *clarity*. 
 
 ```{r}
+# CIG -> Chlorophyll Index Green
+# NDTI -> Normalized Difference Turbidity Index
+# CVI -> Chlorophyll Vegetation Index
 
+moreDataPrep <- function(df) {
+  
+  # add the three spectral indices
+  df %>%
+    mutate(CIG = med_Nir_corr/med_Green_corr,
+           NDTI = (med_Red_corr-med_Green_corr)/(med_Red_corr+med_Green_corr),
+           CVI = (med_Nir_corr*med_Red_corr)/(med_Green_corr**2.0))
+}
+
+sameDay <- moreDataPrep(sameDay)
+oneDay <- moreDataPrep(oneDay)
+threeDay <- moreDataPrep(threeDay)
+fiveDay <- moreDataPrep(fiveDay)
+
+##Pull 20% as holdout test data
+test_fiveDay <- fiveDay %>%
+  sample_frac(.2) 
+
+## Remove holdout data
+train_fiveDay <- fiveDay %>% filter(!rowid %in% test_fiveDay$rowid) 
+
+# adding and formating data to work with xgboost
+more_band_met5_feats <- c('med_Blue_corr', 'med_Green_corr', 'med_Red_corr', 'med_Nir_corr', 'NR', 'BG', 'BR', 'tot_sol_rad_KJpm2_5', 'max_temp_degK_5', 'min_temp_degK_5', 'tot_precip_m_5', 'mean_wind_mps_5', 'CIG', 'NDTI', 'CVI')
+
+dtrain_fd_bm5 <- xgb.DMatrix(data = as.matrix(train_fiveDay[,more_band_met5_feats]), 
+                      label = train_fiveDay[,target])
+
+dtest_fd_bm5 <- xgb.DMatrix(data = as.matrix(test_fiveDay[,more_band_met5_feats]), 
+                     label = test_fiveDay[,target])
+
+# we are using the same parameters we used previously and running the model with those parameters 
+params <- list(booster = "gbtree", 
+               objective = "reg:squarederror", 
+               eta=0.3, 
+               gamma=0.5, 
+               max_depth=1, 
+               min_child_weight=3, 
+               subsample=1, 
+               colsample_bytree=1)
+
+xgb_naive_fd_bm5 <- xgb.train(params = params, 
+                             data = dtrain_fd_bm5, 
+                             nrounds = 1000, 
+                             watchlist = list(train = dtrain_fd_bm5, 
+                                              val = dtest_fd_bm5), 
+                             print_every_n = 25, 
+                             early_stopping_rounds = 10, 
+                             maximize = F)
+```
 ```
 
 
 ### Reproduce the Validation Plot with New Indices
 
 ```{r}
+new_preds_fd_bm5 <- test_fiveDay %>% mutate(predicted_fd_bm5 = predict(xgb_naive_fd_bm5, dtest_fd_bm5))
 
+new_evals_fd_bm5 <- preds_fd_bm5 %>%
+  summarise(rmse = rmse(secchi, predicted_fd_bm5),
+            mae = mae(secchi, predicted_fd_bm5),
+            mape = mape(secchi, predicted_fd_bm5),
+            bias = bias(secchi, predicted_fd_bm5),
+            p.bias = percent_bias(secchi, predicted_fd_bm5),
+            smape = smape(secchi, predicted_fd_bm5)) 
 ```
 
 
@@ -318,7 +397,7 @@ Some key words for spectral indices that might help include *chlorophyll*, *sedi
 
 
 ```{r}
-
+# Adding the three spectral indices did not improve my results, but it might be due to an error I could have made.
 ```
 
 
@@ -333,9 +412,26 @@ work similarly, but they have underlying differences.
 Can you build a new pipeline for the `randomForest` package? Using the same structure
 as above? 
 ```{r}
+library(randomForest)
 
+rf_5_train <- train_fiveDay %>%
+  select(all_of(band_met5_feats),secchi)
+
+rf_5_mod <- randomForest(secchi ~ ., rf_5_train,
+                         mtry = 5,
+                         nodesize = 7,
+                         importance = TRUE)
+
+summary(rf_5_mod)
+
+test_fiveDay$secchi_pred <- predict(rf_5_mod, test_fiveDay)
+
+ggplot(test_fiveDay, aes(x = secchi, y = secchi_pred)) +
+  geom_point() +
+  geom_smooth(method = 'lm', color = 'blue', se = F) + # line of best fit of data vs fitted data
+  geom_abline(intercept = 0, slope = 1, color = 'black') + # one to one line
+  ggthemes::theme_few()
 ```
-
 
 
 # Bonus
